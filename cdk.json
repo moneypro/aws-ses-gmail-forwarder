@@ -17,6 +17,9 @@
     ]
   },
   "context": {
+    "domainName": "yourdomain.com",
+    "destinationEmail": "yourname@gmail.com",
+    "hostedZoneId": "Z0123456789ABCDEF",
     "@aws-cdk/aws-signer:signingProfileNamePassedToCfn": true,
     "@aws-cdk/aws-ecs-patterns:secGroupsDisablesImplicitOpenListener": true,
     "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
