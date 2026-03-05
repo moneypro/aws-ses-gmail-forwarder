@@ -61,5 +61,8 @@ In Gmail Settings > Accounts and Import > Add another email address:
 - **Username:** `SmtpAccessKeyId`
 - **Password:** (The generated SMTP Password)
 
+## Known Issues
+- **Gmail Threading:** Threading in Gmail may not be 100% perfect. Because AWS SES replaces the original `Message-ID` with its own, Gmail's threading engine sometimes fails to link messages even when `In-Reply-To` and `References` headers are preserved. This is a known limitation of using SES as a middleman for forwarding.
+
 ## License
 MIT
