@@ -8,47 +8,34 @@ import * as iam from "aws-cdk-lib/aws-iam";
 import * as actions from "aws-cdk-lib/aws-ses-actions";
 import * as path from "path";
 
+interface DomainConfig {
+  domainName: string;
+  hostedZoneId: string;
+  aliases?: Record<string, string>;
+}
+
 export class SesPipelineStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    // Get configuration from context
-    const domainName = this.node.tryGetContext("domainName");
     const destinationEmail = this.node.tryGetContext("destinationEmail");
-    const hostedZoneId = this.node.tryGetContext("hostedZoneId");
+    const domains: DomainConfig[] = this.node.tryGetContext("domains");
 
-    if (!domainName || !destinationEmail || !hostedZoneId) {
-      throw new Error(
-        "Missing required context variables: domainName, destinationEmail, hostedZoneId. " +
-        "Provide them via cdk.json or -c key=value"
-      );
+    if (!destinationEmail || !domains || domains.length === 0) {
+        throw new Error("Missing required context: destinationEmail and domains list");
     }
 
-    const forwardFrom = `forwarder@${domainName}`;
+    // Build routing map from alias configs
+    const routingMap: Record<string, string> = {};
+    for (const config of domains) {
+      if (config.aliases) {
+        for (const [localPart, dest] of Object.entries(config.aliases)) {
+          routingMap[`${localPart}@${config.domainName}`] = dest;
+        }
+      }
+    }
 
-    // 1. Reference existing Route 53 Hosted Zone
-    const hostedZone = route53.HostedZone.fromHostedZoneAttributes(this, "HostedZone", {
-      hostedZoneId: hostedZoneId,
-      zoneName: domainName,
-    });
-
-    // 2. SES Email Identity (for domain verification and DKIM)
-    const emailIdentity = new ses.EmailIdentity(this, "EmailIdentity", {
-      identity: ses.Identity.publicHostedZone(hostedZone),
-    });
-
-    // 3. Add MX record for SES Inbound
-    new route53.MxRecord(this, "SesMxRecord", {
-      zone: hostedZone,
-      values: [
-        {
-          priority: 10,
-          hostName: `inbound-smtp.${this.region}.amazonaws.com`,
-        },
-      ],
-    });
-
-    // 4. S3 Bucket for Inbound Mail Storage
+    // 1. SHARED RESOURCES
     const bucket = new s3.Bucket(this, "InboundMailBucket", {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
@@ -62,14 +49,15 @@ export class SesPipelineStack extends cdk.Stack {
         actions: ["s3:PutObject"],
         resources: [bucket.arnForObjects("*")],
         conditions: {
-          StringEquals: {
-            "aws:Referer": this.account,
-          },
+          StringEquals: { "aws:Referer": this.account },
         },
       })
     );
 
-    // 5. Lambda Forwarder Function
+    const ruleSet = new ses.ReceiptRuleSet(this, "CombinedRuleSet", {
+      dropSpam: true,
+    });
+
     const forwarderFunction = new lambda.Function(this, "EmailForwarder", {
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: "index.handler",
@@ -77,7 +65,7 @@ export class SesPipelineStack extends cdk.Stack {
       environment: {
         S3_BUCKET: bucket.bucketName,
         DESTINATION_EMAIL: destinationEmail,
-        FORWARD_FROM: forwardFrom,
+        ROUTING_MAP: JSON.stringify(routingMap),
       },
       timeout: cdk.Duration.seconds(30),
     });
@@ -90,43 +78,78 @@ export class SesPipelineStack extends cdk.Stack {
       })
     );
 
-    // 6. SES Receipt Rule Set and Rule
-    const ruleSet = new ses.ReceiptRuleSet(this, "RuleSet", {
-      dropSpam: true,
+    // 2. PER-DOMAIN RESOURCES
+    domains.forEach((config) => {
+        const { domainName, hostedZoneId } = config;
+        const safeDomainName = domainName.replace(/\./g, "-");
+
+        const hostedZone = route53.HostedZone.fromHostedZoneAttributes(this, `HostedZone-${safeDomainName}`, {
+          hostedZoneId: hostedZoneId,
+          zoneName: domainName,
+        });
+
+        // Identity verification
+        new ses.EmailIdentity(this, `EmailIdentity-${safeDomainName}`, {
+          identity: ses.Identity.publicHostedZone(hostedZone),
+        });
+
+        // Explicitly add MX records since they are missing
+        new route53.MxRecord(this, `SesMxRecord-${safeDomainName}`, {
+          zone: hostedZone,
+          values: [
+            {
+              priority: 10,
+              hostName: `inbound-smtp.${this.region}.amazonaws.com`,
+            },
+          ],
+        });
+
+        ruleSet.addRule(`ForwardRule-${safeDomainName}`, {
+          recipients: [domainName],
+          actions: [
+            new actions.S3({ bucket }),
+            new actions.Lambda({ function: forwarderFunction }),
+          ],
+          enabled: true,
+          scanEnabled: true,
+        });
+
+        if (config.aliases) {
+          for (const [localPart] of Object.entries(config.aliases)) {
+            const safeAlias = localPart.replace(/[^a-zA-Z0-9]/g, "-");
+            const aliasAddress = `${localPart}@${domainName}`;
+
+            const aliasUser = new iam.User(this, `SmtpUser-${safeDomainName}-${safeAlias}`);
+            aliasUser.addToPolicy(new iam.PolicyStatement({
+              actions: ["ses:SendRawEmail"],
+              resources: ["*"],
+              conditions: { StringEquals: { "ses:FromAddress": aliasAddress } },
+            }));
+
+            const aliasKey = new iam.AccessKey(this,
+              `SmtpAccessKey-${safeDomainName}-${safeAlias}`, { user: aliasUser });
+
+            new cdk.CfnOutput(this, `SmtpKeyId-${safeDomainName}-${safeAlias}`,
+              { value: aliasKey.accessKeyId });
+            new cdk.CfnOutput(this, `SmtpSecretKey-${safeDomainName}-${safeAlias}`,
+              { value: aliasKey.secretAccessKey.unsafeUnwrap() });
+          }
+        }
     });
 
-    ruleSet.addRule("ForwardToLambda", {
-      recipients: [domainName],
-      actions: [
-        new actions.S3({
-          bucket: bucket,
-        }),
-        new actions.Lambda({
-          function: forwarderFunction,
-        }),
-      ],
-      enabled: true,
-      scanEnabled: true,
-    });
-
-    new cdk.CfnOutput(this, "RuleSetCommand", {
-      value: `aws ses set-active-receipt-rule-set --rule-set-name ${ruleSet.receiptRuleSetName}`,
-    });
-
-    // 7. IAM User for SMTP
+    // 3. SMTP USER
     const smtpUser = new iam.User(this, "SmtpUser");
-    smtpUser.addToPolicy(
-      new iam.PolicyStatement({
+    smtpUser.addToPolicy(new iam.PolicyStatement({
         actions: ["ses:SendRawEmail"],
         resources: ["*"],
-      })
-    );
+    }));
 
     const accessKey = new iam.AccessKey(this, "SmtpAccessKey", { user: smtpUser });
 
-    new cdk.CfnOutput(this, "SmtpAccessKeyId", { value: accessKey.accessKeyId });
-    new cdk.CfnOutput(this, "SmtpSecretAccessKey", {
-      value: accessKey.secretAccessKey.unsafeUnwrap(),
+    new cdk.CfnOutput(this, "RuleSetActivationCommand", {
+      value: `aws ses set-active-receipt-rule-set --rule-set-name ${ruleSet.receiptRuleSetName}`,
     });
+    new cdk.CfnOutput(this, "SmtpAccessKeyId", { value: accessKey.accessKeyId });
+    new cdk.CfnOutput(this, "SmtpSecretAccessKey", { value: accessKey.secretAccessKey.unsafeUnwrap() });
   }
 }

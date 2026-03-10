@@ -9,7 +9,12 @@ export const handler = async (event) => {
     const messageId = record.mail.messageId;
     const bucketName = process.env.S3_BUCKET;
     const destinationEmail = process.env.DESTINATION_EMAIL;
+    const routingMap = JSON.parse(process.env.ROUTING_MAP || "{}");
+
+    // Dynamically pick the sender address based on where the email was sent
+    // e.g. if sent to admin@aqua-iot.com, we forward from admin@aqua-iot.com
     const forwardFrom = record.mail.destination[0];
+    const resolvedDestination = routingMap[forwardFrom] ?? destinationEmail;
 
     try {
         const getObjectResponse = await s3.send(new GetObjectCommand({
@@ -25,16 +30,12 @@ export const handler = async (event) => {
         const headerLines = headersPart.split(/\r?\n/);
         const processedHeaders = [];
         
-        // We will build a new list of headers, specifically preserving 
-        // In-Reply-To and References while strictly replacing From/To.
-        
         let originalFrom = record.mail.commonHeaders.from[0];
         let skipFolding = false;
 
         for (let i = 0; i < headerLines.length; i++) {
             let line = headerLines[i];
             
-            // Handle folding: if line starts with whitespace, it belongs to the previous header
             if (/^\s/.test(line)) {
                 if (skipFolding) continue;
                 processedHeaders.push(line);
@@ -44,9 +45,7 @@ export const handler = async (event) => {
             const lowerLine = line.toLowerCase();
             skipFolding = false;
 
-            // 1. Rewrite FROM
             if (lowerLine.startsWith("from:")) {
-                // Try to keep the display name
                 let fromName = "";
                 const nameMatch = line.match(/^From: (.*)<.*>/i);
                 if (nameMatch) fromName = nameMatch[1].trim().replace(/"/g, '');
@@ -57,13 +56,11 @@ export const handler = async (event) => {
                 continue;
             }
 
-            // 2. Rewrite TO
             if (lowerLine.startsWith("to:")) {
-                processedHeaders.push(`To: ${destinationEmail}`);
+                processedHeaders.push(`To: ${resolvedDestination}`);
                 continue;
             }
 
-            // 3. STRIP headers that cause SES conflicts or double-delivery
             if (lowerLine.startsWith("return-path:") || 
                 lowerLine.startsWith("dkim-signature:") ||
                 lowerLine.startsWith("sender:") ||
@@ -71,11 +68,10 @@ export const handler = async (event) => {
                 lowerLine.startsWith("x-forwarded-to:") ||
                 lowerLine.startsWith("delivered-to:") ||
                 lowerLine.startsWith("reply-to:")) {
-                skipFolding = true; // Skip this header and any folded lines following it
+                skipFolding = true;
                 continue;
             }
 
-            // 4. KEEP everything else (In-Reply-To, References, Subject, Message-ID, etc.)
             processedHeaders.push(line);
         }
 

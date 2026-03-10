@@ -17,9 +17,28 @@
     ]
   },
   "context": {
-    "domainName": "yourdomain.com",
-    "destinationEmail": "yourname@gmail.com",
-    "hostedZoneId": "Z0123456789ABCDEF",
+    "destinationEmail": "chenghong5451@gmail.com",
+    "domains": [
+      {
+        "domainName": "desdaytondigital.com",
+        "hostedZoneId": "Z0096032TSVMAVXD2O37"
+      },
+      {
+        "domainName": "aqua-iot.com",
+        "hostedZoneId": "Z00680942EP57HLB5KP4Y"
+      },
+      {
+        "domainName": "tegratauto.com",
+        "hostedZoneId": "Z0336417NRV9NVONSRU0",
+        "aliases": {
+          "admin":  "chenghong5451@gmail.com",
+          "bowen":  "bowenhuang1201@gmail.com",
+          "bowenz": "usmobowen@gmail.com",
+          "sasha":  "sashazakhvatova@gmail.com",
+          "dalin":  "dalinhenderson@yahoo.com"
+        }
+      }
+    ],
     "@aws-cdk/aws-signer:signingProfileNamePassedToCfn": true,
     "@aws-cdk/aws-ecs-patterns:secGroupsDisablesImplicitOpenListener": true,
     "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
