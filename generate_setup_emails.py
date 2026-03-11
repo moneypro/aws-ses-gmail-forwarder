@@ -50,12 +50,12 @@ ALIASES = [
         "secret": "REPLACE_WITH_SmtpSecretKey-tegratauto-com-bowen",
     },
     {
-        "name": "Bowen Z",
-        "alias": "bowenz",
-        "email": "bowenz@tegratauto.com",
+        "name": "Bowen Zhao",
+        "alias": "bowenzhao",
+        "email": "bowenzhao@tegratauto.com",
         "personal_email": "usmobowen@gmail.com",
-        "key_id": "REPLACE_WITH_SmtpKeyId-tegratauto-com-bowenz",
-        "secret": "REPLACE_WITH_SmtpSecretKey-tegratauto-com-bowenz",
+        "key_id": "REPLACE_WITH_SmtpKeyId-tegratauto-com-bowenzhao",
+        "secret": "REPLACE_WITH_SmtpSecretKey-tegratauto-com-bowenzhao",
     },
     {
         "name": "Dalin",
