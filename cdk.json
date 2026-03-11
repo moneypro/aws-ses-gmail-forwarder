@@ -25,7 +25,10 @@
       },
       {
         "domainName": "aqua-iot.com",
-        "hostedZoneId": "Z00680942EP57HLB5KP4Y"
+        "hostedZoneId": "Z00680942EP57HLB5KP4Y",
+        "aliases": {
+          "hong": "chenghong5451@gmail.com"
+        }
       },
       {
         "domainName": "tegratauto.com",
