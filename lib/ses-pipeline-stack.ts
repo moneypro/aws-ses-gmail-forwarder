@@ -6,6 +6,7 @@ import * as s3 from "aws-cdk-lib/aws-s3";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as actions from "aws-cdk-lib/aws-ses-actions";
+import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as path from "path";
 
 interface DomainConfig {
@@ -35,11 +36,25 @@ export class SesPipelineStack extends cdk.Stack {
       }
     }
 
-    // 1. SHARED RESOURCES
+    // 1. SQS QUEUES FOR EMAIL EXTRACTION
+    const extractionDLQ = new sqs.Queue(this, "EmailExtractionDLQ", {
+      retentionPeriod: cdk.Duration.days(14),
+    });
+
+    const extractionQueue = new sqs.Queue(this, "EmailExtractionQueue", {
+      visibilityTimeout: cdk.Duration.seconds(300),
+      retentionPeriod: cdk.Duration.days(4),
+      deadLetterQueue: {
+        queue: extractionDLQ,
+        maxReceiveCount: 3,
+      },
+    });
+
+    // 2. SHARED RESOURCES
     const bucket = new s3.Bucket(this, "InboundMailBucket", {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
-      lifecycleRules: [{ expiration: cdk.Duration.days(1) }],
+      lifecycleRules: [{ expiration: cdk.Duration.days(365 * 5) }], // 5-year retention for compliance
     });
 
     bucket.addToResourcePolicy(
@@ -66,11 +81,13 @@ export class SesPipelineStack extends cdk.Stack {
         S3_BUCKET: bucket.bucketName,
         DESTINATION_EMAIL: destinationEmail,
         ROUTING_MAP: JSON.stringify(routingMap),
+        SQS_QUEUE_URL: extractionQueue.queueUrl,
       },
       timeout: cdk.Duration.seconds(30),
     });
 
     bucket.grantRead(forwarderFunction);
+    extractionQueue.grantSendMessages(forwarderFunction);
     forwarderFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["ses:SendRawEmail"],
@@ -137,7 +154,24 @@ export class SesPipelineStack extends cdk.Stack {
         }
     });
 
-    // 3. SMTP USER
+    // 3. EXTRACTOR SERVICE USER (for EC2 Docker service polling SQS)
+    const extractorUser = new iam.User(this, "ExtractorServiceUser");
+    extractorUser.addToPolicy(new iam.PolicyStatement({
+      actions: ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"],
+      resources: [extractionQueue.queueArn],
+    }));
+    extractorUser.addToPolicy(new iam.PolicyStatement({
+      actions: ["s3:GetObject"],
+      resources: [bucket.arnForObjects("*")],
+    }));
+
+    const extractorKey = new iam.AccessKey(this, "ExtractorAccessKey", { user: extractorUser });
+
+    new cdk.CfnOutput(this, "SqsQueueUrl", { value: extractionQueue.queueUrl });
+    new cdk.CfnOutput(this, "ExtractorAccessKeyId", { value: extractorKey.accessKeyId });
+    new cdk.CfnOutput(this, "ExtractorSecretAccessKey", { value: extractorKey.secretAccessKey.unsafeUnwrap() });
+
+    // 4. SMTP USER
     const smtpUser = new iam.User(this, "SmtpUser");
     smtpUser.addToPolicy(new iam.PolicyStatement({
         actions: ["ses:SendRawEmail"],

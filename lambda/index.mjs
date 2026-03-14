@@ -1,8 +1,10 @@
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { SESClient, SendRawEmailCommand } from "@aws-sdk/client-ses";
+import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 
 const s3 = new S3Client({});
 const ses = new SESClient({});
+const sqsClient = new SQSClient({});
 
 export const handler = async (event) => {
     const record = event.Records[0].ses;
@@ -82,6 +84,22 @@ export const handler = async (event) => {
                 Data: Buffer.from(newRawEmail)
             }
         }));
+
+        // Publish to SQS for email extraction (non-blocking)
+        try {
+            await sqsClient.send(new SendMessageCommand({
+                QueueUrl: process.env.SQS_QUEUE_URL,
+                MessageBody: JSON.stringify({
+                    s3Bucket: bucketName,
+                    s3Key: messageId,
+                    recipient: forwardFrom,
+                    subject: record.mail.commonHeaders.subject,
+                    timestamp: record.mail.timestamp,
+                }),
+            }));
+        } catch (sqsErr) {
+            console.error("SQS publish failed (non-fatal):", sqsErr);
+        }
 
         return { status: "success" };
     } catch (err) {
