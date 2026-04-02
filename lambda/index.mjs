@@ -1,10 +1,12 @@
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { SESClient, SendRawEmailCommand } from "@aws-sdk/client-ses";
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
+import { DynamoDBClient, GetItemCommand } from "@aws-sdk/client-dynamodb";
 
 const s3 = new S3Client({});
 const ses = new SESClient({});
 const sqsClient = new SQSClient({});
+const dynamoClient = process.env.ROUTING_TABLE_NAME ? new DynamoDBClient({}) : null;
 
 export const handler = async (event) => {
     const record = event.Records[0].ses;
@@ -16,7 +18,27 @@ export const handler = async (event) => {
     // Dynamically pick the sender address based on where the email was sent
     // e.g. if sent to admin@aqua-iot.com, we forward from admin@aqua-iot.com
     const forwardFrom = record.mail.destination[0];
-    const resolvedDestination = routingMap[forwardFrom] ?? destinationEmail;
+
+    // Look up destination: DynamoDB first, then env var fallback
+    let resolvedDestination = destinationEmail;
+    if (dynamoClient) {
+        try {
+            const result = await dynamoClient.send(new GetItemCommand({
+                TableName: process.env.ROUTING_TABLE_NAME,
+                Key: { email: { S: forwardFrom } },
+            }));
+            if (result.Item?.destination?.S) {
+                resolvedDestination = result.Item.destination.S;
+            } else {
+                resolvedDestination = routingMap[forwardFrom] ?? destinationEmail;
+            }
+        } catch (dynamoErr) {
+            console.error("DynamoDB lookup failed, falling back to env var:", dynamoErr);
+            resolvedDestination = routingMap[forwardFrom] ?? destinationEmail;
+        }
+    } else {
+        resolvedDestination = routingMap[forwardFrom] ?? destinationEmail;
+    }
 
     try {
         const getObjectResponse = await s3.send(new GetObjectCommand({

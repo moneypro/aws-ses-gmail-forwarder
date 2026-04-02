@@ -7,6 +7,8 @@ import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as actions from "aws-cdk-lib/aws-ses-actions";
 import * as sqs from "aws-cdk-lib/aws-sqs";
+import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
+import * as apigateway from "aws-cdk-lib/aws-apigateway";
 import * as path from "path";
 
 interface DomainConfig {
@@ -50,7 +52,14 @@ export class SesPipelineStack extends cdk.Stack {
       },
     });
 
-    // 2. SHARED RESOURCES
+    // 2. DYNAMODB ROUTING TABLE
+    const routingTable = new dynamodb.Table(this, "EmailRoutingTable", {
+      partitionKey: { name: "email", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // 3. SHARED RESOURCES
     const bucket = new s3.Bucket(this, "InboundMailBucket", {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
@@ -82,11 +91,13 @@ export class SesPipelineStack extends cdk.Stack {
         DESTINATION_EMAIL: destinationEmail,
         ROUTING_MAP: JSON.stringify(routingMap),
         SQS_QUEUE_URL: extractionQueue.queueUrl,
+        ROUTING_TABLE_NAME: routingTable.tableName,
       },
       timeout: cdk.Duration.seconds(30),
     });
 
     bucket.grantRead(forwarderFunction);
+    routingTable.grantReadData(forwarderFunction);
     extractionQueue.grantSendMessages(forwarderFunction);
     forwarderFunction.addToRolePolicy(
       new iam.PolicyStatement({
@@ -95,7 +106,72 @@ export class SesPipelineStack extends cdk.Stack {
       })
     );
 
-    // 2. PER-DOMAIN RESOURCES
+    // 4. ALIAS PROVISIONING API
+    const iamPath = "/ses-provisioner/";
+
+    const provisionerFunction = new lambda.Function(this, "AliasProvisioner", {
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/provisioner")),
+      environment: {
+        ROUTING_TABLE_NAME: routingTable.tableName,
+        AWS_SES_REGION: this.region,
+        IAM_PATH: iamPath,
+      },
+      timeout: cdk.Duration.seconds(30),
+    });
+
+    routingTable.grantReadWriteData(provisionerFunction);
+
+    provisionerFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        "iam:CreateUser",
+        "iam:DeleteUser",
+        "iam:PutUserPolicy",
+        "iam:DeleteUserPolicy",
+        "iam:CreateAccessKey",
+        "iam:ListAccessKeys",
+        "iam:DeleteAccessKey",
+      ],
+      resources: [
+        `arn:aws:iam::${this.account}:user${iamPath}*`,
+      ],
+    }));
+
+    const api = new apigateway.RestApi(this, "AliasProvisioningApi", {
+      restApiName: "Email Alias Provisioning",
+      description: "API for managing email alias routing and SMTP credentials",
+    });
+
+    const aliasesResource = api.root.addResource("aliases");
+    const singleAliasResource = aliasesResource.addResource("{email}");
+    const provisionerIntegration = new apigateway.LambdaIntegration(provisionerFunction);
+
+    aliasesResource.addMethod("GET", provisionerIntegration, { apiKeyRequired: true });
+    aliasesResource.addMethod("POST", provisionerIntegration, { apiKeyRequired: true });
+    singleAliasResource.addMethod("GET", provisionerIntegration, { apiKeyRequired: true });
+    singleAliasResource.addMethod("DELETE", provisionerIntegration, { apiKeyRequired: true });
+
+    const apiKey = api.addApiKey("ProvisioningApiKey", {
+      apiKeyName: "email-provisioning-key",
+    });
+
+    const usagePlan = api.addUsagePlan("ProvisioningUsagePlan", {
+      name: "email-provisioning-plan",
+      throttle: { rateLimit: 10, burstLimit: 10 },
+      quota: { limit: 100, period: apigateway.Period.DAY },
+    });
+
+    usagePlan.addApiKey(apiKey);
+    usagePlan.addApiStage({ stage: api.deploymentStage });
+
+    new cdk.CfnOutput(this, "ProvisioningApiUrl", { value: api.url });
+    new cdk.CfnOutput(this, "ProvisioningApiKeyId", {
+      value: apiKey.keyId,
+      description: "Retrieve the key value with: aws apigateway get-api-key --api-key <id> --include-value",
+    });
+
+    // 5. PER-DOMAIN RESOURCES
     domains.forEach((config) => {
         const { domainName, hostedZoneId } = config;
         const safeDomainName = domainName.replace(/\./g, "-");

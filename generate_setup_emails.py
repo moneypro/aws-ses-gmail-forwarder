@@ -81,6 +81,14 @@ ALIASES = [
         "key_id": "REPLACE_WITH_SmtpKeyId-tegratauto-com-fante",
         "secret": "REPLACE_WITH_SmtpSecretKey-tegratauto-com-fante",
     },
+    {
+        "name": "Aye",
+        "alias": "aye",
+        "email": "aye@tegratauto.com",
+        "personal_email": "aye.starr00@gmail.com",
+        "key_id": "REPLACE_WITH_SmtpKeyId-tegratauto-com-aye",
+        "secret": "REPLACE_WITH_SmtpSecretKey-tegratauto-com-aye",
+    },
 ]
 
 SMTP_SERVER = f"email-smtp.{REGION}.amazonaws.com"
